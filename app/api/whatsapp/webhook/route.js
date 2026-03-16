@@ -8,7 +8,7 @@
  * only if our verify token matches — this proves we own the endpoint and completes verification.
  */
 
-import { getDb } from "../../../lib/mongodb";
+import { getDb } from "../../../../lib/mongodb";
 
 /** WhatsApp group JID suffix; messages with context.from ending in this are from groups. */
 const GROUP_JID_SUFFIX = "@g.us";
