@@ -8,6 +8,20 @@
  * only if our verify token matches — this proves we own the endpoint and completes verification.
  */
 
+import { getDb } from "../../../lib/mongodb";
+
+/** WhatsApp group JID suffix; messages with context.from ending in this are from groups. */
+const GROUP_JID_SUFFIX = "@g.us";
+
+/**
+ * Returns true if the message was sent in a group (we ignore group messages and only store customer 1:1).
+ */
+function isGroupMessage(message) {
+  const contextFrom = message.context?.from;
+  if (!contextFrom || typeof contextFrom !== "string") return false;
+  return contextFrom.endsWith(GROUP_JID_SUFFIX);
+}
+
 /**
  * GET handler — Webhook verification by Meta
  * Meta calls this when you set or update the webhook URL in the app dashboard.
@@ -41,9 +55,9 @@ export async function POST(request) {
     return Response.json({ status: "error", message: "Invalid JSON" }, { status: 400 });
   }
 
-  // Log the entire payload for debugging
-  console.log("Incoming WhatsApp webhook event");
-  console.log(JSON.stringify(body, null, 2));
+  // Log the entire payload for debugging (shows in Vercel Logs → Messages for this POST request)
+  console.log("[WhatsApp] Incoming webhook event (POST)");
+  console.log("[WhatsApp] Full payload:", JSON.stringify(body, null, 2));
 
   // Safely traverse the webhook payload structure
   const entry = body.entry?.[0];
@@ -56,15 +70,42 @@ export async function POST(request) {
     return Response.json({ status: "received" });
   }
 
+  const db = await getDb();
+  const collectionName = "messages";
+
   for (const message of messages) {
+    // Skip group messages; save only direct customer messages
+    if (isGroupMessage(message)) {
+      console.log("[WhatsApp] Skipping group message (not stored)");
+      continue;
+    }
+
     const phone = message.from;
+    const type = message.type ?? "text";
     const text = message.text?.body ?? "";
     const timestamp = message.timestamp;
+    const messageId = message.id;
 
-    console.log("New message from:", phone);
-    console.log("Message text:", text);
+    console.log("[WhatsApp] New message from:", phone);
+    console.log("[WhatsApp] Message text:", text);
     if (timestamp != null) {
-      console.log("Timestamp:", timestamp);
+      console.log("[WhatsApp] Timestamp:", timestamp);
+    }
+
+    if (db) {
+      try {
+        await db.collection(collectionName).insertOne({
+          from: phone,
+          type,
+          text,
+          timestamp: timestamp ?? null,
+          messageId: messageId ?? null,
+          receivedAt: new Date(),
+        });
+        console.log("[WhatsApp] Message saved to MongoDB");
+      } catch (err) {
+        console.error("[WhatsApp] MongoDB save error:", err.message);
+      }
     }
   }
 
