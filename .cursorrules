@@ -1,0 +1,5 @@
+# Project rules
+
+## Secrets and environment
+- NEVER commit .env.local or any file containing real credentials, API keys, or connection strings.
+- .env.example must contain ONLY placeholders (e.g. <your-verify-token>, <your-atlas-connection-string>). No real-looking URIs, tokens, or passwords—even in comments—to avoid triggering secret scanners.
