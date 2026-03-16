@@ -73,6 +73,10 @@ export async function POST(request) {
   const db = await getDb();
   const collectionName = "messages";
 
+  if (!db) {
+    console.warn("[WhatsApp] MongoDB not configured or connection failed. Set MONGO_URL (and optionally DB_NAME) in Vercel env. Messages will not be saved.");
+  }
+
   for (const message of messages) {
     // Skip group messages; save only direct customer messages
     if (isGroupMessage(message)) {
@@ -104,7 +108,7 @@ export async function POST(request) {
         });
         console.log("[WhatsApp] Message saved to MongoDB");
       } catch (err) {
-        console.error("[WhatsApp] MongoDB save error:", err.message);
+        console.error("[WhatsApp] MongoDB save error:", err.message, err.code || "");
       }
     }
   }
