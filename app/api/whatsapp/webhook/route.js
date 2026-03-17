@@ -2,19 +2,20 @@
  * WhatsApp Cloud API Webhook
  * Endpoint: /api/whatsapp/webhook
  *
- * Webhook verification (GET):
- * When you register your webhook URL in Meta Developer Console, Meta sends a GET request
- * with hub.mode, hub.verify_token, and hub.challenge. We must return the challenge value
- * only if our verify token matches — this proves we own the endpoint and completes verification.
+ * Stores only INCOMING messages (customers → business) as leads.
+ * One document per customer (phone), with conversation history.
+ * Ignores: group messages, echo/outgoing messages.
  */
 
 import { getDb } from "../../../../lib/mongodb";
+
+const COLLECTION_LEADS = "leads";
 
 /** WhatsApp group JID suffix; messages with context.from ending in this are from groups. */
 const GROUP_JID_SUFFIX = "@g.us";
 
 /**
- * Returns true if the message was sent in a group (we ignore group messages and only store customer 1:1).
+ * Returns true if the message was sent in a group (we ignore group messages).
  */
 function isGroupMessage(message) {
   const contextFrom = message.context?.from;
@@ -23,8 +24,24 @@ function isGroupMessage(message) {
 }
 
 /**
+ * Returns true if the message is an echo (sent BY the business) — do not store.
+ */
+function isEchoOrOutgoing(message) {
+  return message.echo === true;
+}
+
+/**
+ * Get customer name from webhook value.contacts (matched by wa_id === message.from).
+ */
+function getCustomerName(value, fromPhone) {
+  const contacts = value?.contacts;
+  if (!Array.isArray(contacts)) return null;
+  const contact = contacts.find((c) => String(c.wa_id) === String(fromPhone));
+  return contact?.profile?.name ?? null;
+}
+
+/**
  * GET handler — Webhook verification by Meta
- * Meta calls this when you set or update the webhook URL in the app dashboard.
  */
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
@@ -34,7 +51,6 @@ export async function GET(request) {
 
   const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
 
-  // Only respond with the challenge if the token matches and mode is "subscribe"
   if (mode === "subscribe" && token === verifyToken) {
     return new Response(challenge ?? "", { status: 200 });
   }
@@ -43,8 +59,8 @@ export async function GET(request) {
 }
 
 /**
- * POST handler — Incoming WhatsApp events (messages, delivery/read updates)
- * Meta sends all webhook events here. We parse the payload and log message details.
+ * POST handler — Incoming WhatsApp events.
+ * Only stores messages sent FROM customers TO the business (one lead per phone, conversation history).
  */
 export async function POST(request) {
   let body;
@@ -55,61 +71,80 @@ export async function POST(request) {
     return Response.json({ status: "error", message: "Invalid JSON" }, { status: 400 });
   }
 
-  // Log the entire payload for debugging (shows in Vercel Logs → Messages for this POST request)
   console.log("[WhatsApp] Incoming webhook event (POST)");
-  console.log("[WhatsApp] Full payload:", JSON.stringify(body, null, 2));
 
-  // Safely traverse the webhook payload structure
   const entry = body.entry?.[0];
   const changes = entry?.changes?.[0];
   const value = changes?.value;
   const messages = value?.messages;
 
-  // Handle cases where there is no messages array (e.g. delivery/read receipts, status updates)
   if (!messages || !Array.isArray(messages)) {
     return Response.json({ status: "received" });
   }
 
   const db = await getDb();
-  const collectionName = "messages";
-
   if (!db) {
-    console.warn("[WhatsApp] MongoDB not configured or connection failed. Set MONGO_URL (and optionally DB_NAME) in Vercel env. Messages will not be saved.");
+    console.warn("[WhatsApp] MongoDB not configured. Set MONGO_URL (and DB_NAME) in Vercel env.");
+    return Response.json({ status: "received" });
   }
 
+  const collection = db.collection(COLLECTION_LEADS);
+
   for (const message of messages) {
-    // Skip group messages; save only direct customer messages
     if (isGroupMessage(message)) {
-      console.log("[WhatsApp] Skipping group message (not stored)");
+      console.log("[WhatsApp] Skipping group message");
+      continue;
+    }
+    if (isEchoOrOutgoing(message)) {
+      console.log("[WhatsApp] Skipping echo/outgoing message (sent by business)");
       continue;
     }
 
-    const phone = message.from;
-    const type = message.type ?? "text";
+    const phone = String(message.from);
+    const name = getCustomerName(value, phone) ?? null;
     const text = message.text?.body ?? "";
-    const timestamp = message.timestamp;
-    const messageId = message.id;
+    const timestamp = message.timestamp ?? null;
+    const messageId = message.id ?? null;
 
-    console.log("[WhatsApp] New message from:", phone);
-    console.log("[WhatsApp] Message text:", text);
-    if (timestamp != null) {
-      console.log("[WhatsApp] Timestamp:", timestamp);
-    }
+    if (!text.trim()) continue;
 
-    if (db) {
-      try {
-        await db.collection(collectionName).insertOne({
-          from: phone,
-          type,
-          text,
-          timestamp: timestamp ?? null,
-          messageId: messageId ?? null,
-          receivedAt: new Date(),
+    console.log("[WhatsApp] Incoming from:", phone, "name:", name || "(none)", "text:", text.slice(0, 50));
+
+    const conversationEntry = {
+      text,
+      timestamp,
+      messageId,
+      receivedAt: new Date(),
+    };
+
+    try {
+      const existing = await collection.findOne({ phone });
+
+      if (!existing) {
+        await collection.insertOne({
+          phone,
+          name,
+          firstMessageText: text,
+          firstMessageTimestamp: timestamp,
+          conversation: [conversationEntry],
+          updatedAt: new Date(),
         });
-        console.log("[WhatsApp] Message saved to MongoDB");
-      } catch (err) {
-        console.error("[WhatsApp] MongoDB save error:", err.message, err.code || "");
+        console.log("[WhatsApp] New lead saved:", phone);
+      } else {
+        await collection.updateOne(
+          { phone },
+          {
+            $push: { conversation: conversationEntry },
+            $set: {
+              updatedAt: new Date(),
+              ...(name != null && name !== "" && { name }),
+            },
+          }
+        );
+        console.log("[WhatsApp] Lead updated, message appended:", phone);
       }
+    } catch (err) {
+      console.error("[WhatsApp] DB error:", err.message, err.code || "");
     }
   }
 

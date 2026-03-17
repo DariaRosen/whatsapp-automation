@@ -36,7 +36,7 @@ export async function GET() {
 
     await db.command({ ping: 1 });
     const collections = await db.listCollections().toArray();
-    const messageCount = await db.collection("messages").countDocuments();
+    const leadsCount = await db.collection("leads").countDocuments();
 
     return Response.json({
       ok: true,
@@ -45,7 +45,7 @@ export async function GET() {
       dbNameUsed,
       connection: "ok",
       collections: collections.map((c) => c.name),
-      messagesInCollection: messageCount,
+      leadsCount,
     });
   } catch (err) {
     return Response.json({
